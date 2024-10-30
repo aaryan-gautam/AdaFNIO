@@ -10,6 +10,10 @@ def make_model():
 
 
 class KernelEstimation(torch.nn.Module):
+    """
+    Estimates kernels for adaptive convolution in frame interpolation.
+    Includes sub-modules for kernel weights, offsets, and occlusion estimation.
+    """
     def __init__(self, kernel_size):
         super(KernelEstimation, self).__init__()
         self.kernel_size = kernel_size
@@ -69,6 +73,7 @@ class KernelEstimation(torch.nn.Module):
                 torch.nn.Sigmoid()
             )
 
+        # Define feature extraction layers
         self.moduleConv1 = Basic(6, 32)
         self.modulePool1 = torch.nn.AvgPool2d(kernel_size=2, stride=2)
 
@@ -84,6 +89,7 @@ class KernelEstimation(torch.nn.Module):
         self.moduleConv5 = Basic(256, 512)
         self.modulePool5 = torch.nn.AvgPool2d(kernel_size=2, stride=2)
 
+        # Define upsampling and decoding layers
         self.moduleDeconv5 = Basic(512, 512)
         self.moduleUpsample5 = Upsample(512)
 
@@ -96,6 +102,7 @@ class KernelEstimation(torch.nn.Module):
         self.moduleDeconv2 = Basic(128, 64)
         self.moduleUpsample2 = Upsample(64)
 
+        # Define subnets for kernel estimation
         self.moduleWeight1 = Subnet_weight(self.kernel_size ** 2)
         self.moduleAlpha1 = Subnet_offset(self.kernel_size ** 2)
         self.moduleBeta1 = Subnet_offset(self.kernel_size ** 2)
@@ -105,8 +112,13 @@ class KernelEstimation(torch.nn.Module):
         self.moduleOcclusion = Subnet_occlusion()
 
     def forward(self, rfield0, rfield2):
+        """
+        Forward pass for kernel estimation, taking two input frames and
+        producing weights, offsets, and occlusion masks.
+        """
         tensorJoin = torch.cat([rfield0, rfield2], 1)
 
+        # Encoder pathway
         tensorConv1 = self.moduleConv1(tensorJoin)
         tensorPool1 = self.modulePool1(tensorConv1)
 
@@ -122,6 +134,7 @@ class KernelEstimation(torch.nn.Module):
         tensorConv5 = self.moduleConv5(tensorPool4)
         tensorPool5 = self.modulePool5(tensorConv5)
 
+        # Decoder pathway
         tensorDeconv5 = self.moduleDeconv5(tensorPool5)
         tensorUpsample5 = self.moduleUpsample5(tensorDeconv5)
 
@@ -142,6 +155,7 @@ class KernelEstimation(torch.nn.Module):
 
         tensorCombine = tensorUpsample2 + tensorConv2
 
+        # Estimate kernel parameters
         Weight1 = self.moduleWeight1(tensorCombine)
         Alpha1 = self.moduleAlpha1(tensorCombine)
         Beta1 = self.moduleBeta1(tensorCombine)
@@ -168,26 +182,14 @@ class AdaCoFNet(torch.nn.Module):
         self.moduleAdaCoF = adacof.FunctionAdaCoF.apply
 
     def forward(self, frame0, frame2):
-        h0 = int(list(frame0.size())[2])
-        w0 = int(list(frame0.size())[3])
-        h2 = int(list(frame2.size())[2])
-        w2 = int(list(frame2.size())[3])
+        h0, w0 = int(list(frame0.size())[2]), int(list(frame0.size())[3])
+        h2, w2 = int(list(frame2.size())[2]), int(list(frame2.size())[3])
         if h0 != h2 or w0 != w2:
             sys.exit('Frame sizes do not match')
 
-        h_padded = False
-        w_padded = False
-        if h0 % 32 != 0:
-            pad_h = 32 - (h0 % 32)
-            frame0 = F.pad(frame0, (0, 0, 0, pad_h), mode='reflect')
-            frame2 = F.pad(frame2, (0, 0, 0, pad_h), mode='reflect')
-            h_padded = True
+        # pad frames if necesarry
+        frame0, frame2 = self._pad_frames(frame0, frame2)
 
-        if w0 % 32 != 0:
-            pad_w = 32 - (w0 % 32)
-            frame0 = F.pad(frame0, (0, pad_w, 0, 0), mode='reflect')
-            frame2 = F.pad(frame2, (0, pad_w, 0, 0), mode='reflect')
-            w_padded = True
         Weight1, Alpha1, Beta1, Weight2, Alpha2, Beta2, Occlusion = self.get_kernel(moduleNormalize(frame0), moduleNormalize(frame2))
 
         tensorAdaCoF1 = self.moduleAdaCoF(self.modulePad(frame0), Weight1, Alpha1, Beta1, self.dilation)
@@ -217,3 +219,13 @@ class AdaCoFNet(torch.nn.Module):
             return {'frame1': frame1, 'g_Spatial': g_Spatial, 'g_Occlusion': g_Occlusion}
         else:
             return frame1
+        
+    def _pad_frames(self, frame0: torch.Tensor, frame2: torch.Tensor) -> tuple:
+        """Pads frames to ensure compatibility with downsampling."""
+        h, w = frame0.size(2), frame0.size(3)
+        pad_h = (32 - h % 32) if h % 32 != 0 else 0
+        pad_w = (32 - w % 32) if w % 32 != 0 else 0
+        if pad_h or pad_w:
+            frame0 = F.pad(frame0, (0, pad_w, 0, pad_h), mode='reflect')
+            frame2 = F.pad(frame2, (0, pad_w, 0, pad_h), mode='reflect')
+        return frame0, frame2
